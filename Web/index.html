@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>STM32 CPU Temperature</title>
+    <style>
+        body { font-family: monospace; padding: 10px; }
+        textarea { width: 100%; height: 300px; }
+    </style>
+</head>
+<body>
+
+<button onclick="connect()">Подключиться</button>
+<br><br>
+
+<h1>Температура: <span style="font-family: monospace" id="mcuTemp">NaN</span>&deg;C</h1>
+
+<details>
+    <summary>Отладка</summary>
+
+    <textarea id="log" readonly></textarea>
+    <br><br>
+
+    <input id="tx" placeholder="01 02 03 04">
+    <button onclick="send()">Отправить</button>
+    <button onclick="pingMcu()">Пинг</button>
+    <span id="pingResponse"></span>
+</details>
+
+<script>
+    if (!('serial' in navigator)) {
+        alert("Ваш браузер не поддерживает Web Serial API.");
+    }
+</script>
+
+<script>
+    const PacketIds = {
+        INVALID: 0,
+        ERROR: 1,
+        PING: 2,
+        PONG: 3,
+        REQUEST: 4,
+        REQUEST_CONTINUOUS_START: 5,
+        REQUEST_CONTINUOUS_STOP: 6,
+        RESPONSE: 7,
+    };
+    Object.freeze(PacketIds);
+
+    let port, reader, writer;
+    let keepReading = false;
+    let pingStart;
+
+    const log = document.getElementById('log');
+    const pingResponse = document.getElementById("pingResponse");
+
+    function logLine(s) {
+        log.value += s + "\n";
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function bytesToHex(bytes) {
+        return [...bytes].map(b => b.toString(16).padStart(2, '0')).join(' ');
+    }
+
+    function hexToBytes(str) {
+        return new Uint8Array(
+            str.trim().split(/\s+/).map(x => parseInt(x, 16))
+        );
+    }
+
+    function numberToLE(value, byteLength) {
+        const bytes = new Uint8Array(byteLength);
+        for (let i = 0; i < byteLength; i++) {
+            bytes[i] = value & 0xFF;
+            value >>= 8;
+        }
+        return bytes;
+    }
+
+    // CRC-32/MPEG-2
+    function crc32_stm32(bytes) {
+        let crc = 0xFFFFFFFF;
+        const poly = 0x04C11DB7;
+
+        for (let b of bytes) {
+            crc ^= (b << 24);
+            for (let i = 0; i < 8; i++) {
+                if (crc & 0x80000000)
+                    crc = (crc << 1) ^ poly;
+                else
+                    crc <<= 1;
+                crc >>>= 0;
+            }
+        }
+        return crc >>> 0;
+    }
+
+    async function connect() {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+        keepReading = true;
+
+        logLine("[CONNECTED]");
+        await readLoop();
+    }
+
+    async function readLoop() {
+        try {
+            while (keepReading) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                if (value) logLine(bytesToHex(value));
+            }
+        } catch (e) {
+            logLine("[READ ERROR]");
+        } finally {
+            await disconnect();
+        }
+    }
+
+    async function disconnect() {
+        keepReading = false;
+
+        try { reader?.cancel(); } catch {}
+        try { reader?.releaseLock(); } catch {}
+        try { writer?.releaseLock(); } catch {}
+        try { await port?.close(); } catch {}
+
+        logLine("[DISCONNECTED]");
+    }
+
+    async function send() {
+        const bytes = hexToBytes(document.getElementById('tx').value);
+
+        await writer.write(bytes);
+    }
+
+    async function sendPacket(packetId, ...arguments) {
+        // Пример пинга: [AA 55] [02] [12 BF FB A2]
+        let data = [0xAA, 0x55, packetId];
+        for (const arg of arguments) {
+            let argType = typeof arguments;
+            switch (argType) {
+                default: throw `Неизвестный тип данных "${argType}" у значения "${arg}"`;
+            }
+        }
+
+        let crc = crc32_stm32(data);
+        data = [...data, ...numberToLE(crc, 4)];
+        await writer.write(new Uint8Array(data));
+    }
+
+    async function pingMcu() {
+        pingStart = performance.now();
+        pingResponse.innerText = "...";
+
+        await sendPacket(PacketIds.PING);
+    }
+
+    navigator.serial.addEventListener("disconnect", e => {
+        if (e.target === port) disconnect();
+    });
+</script>
+
+</body>
+</html>
