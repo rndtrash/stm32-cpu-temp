@@ -6,10 +6,10 @@
 #include <cstddef>
 #include <atomic>
 
-template<size_t size>
-class ByteQueue {
+template<typename T, size_t size>
+class CircularQueue {
 public:
-    std::optional<std::byte> pop() {
+    std::optional<T> pop() {
         if (isEmpty()) return std::nullopt;
 
         const auto value = array[indexStart];
@@ -19,7 +19,7 @@ public:
         return value;
     }
 
-    bool push(std::byte byte) {
+    bool push(T byte) {
         if (isFull()) return false;
 
         array[indexEnd] = byte;
@@ -33,7 +33,7 @@ public:
     [[nodiscard]] bool isFull() const { return !empty && indexStart == indexEnd; }
 
 private:
-    std::array<std::byte, size> array = {};
+    std::array<T, size> array = {};
     std::atomic<size_t> indexStart = 0;
     std::atomic<size_t> indexEnd = 0;
     std::atomic<bool> empty = true;

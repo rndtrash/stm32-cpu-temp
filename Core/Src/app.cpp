@@ -4,7 +4,7 @@
 #include <packet.hpp>
 #include <queue.hpp>
 
-static auto queue = ByteQueue<32>();
+static auto queue = CircularQueue<std::byte, 32>();
 static bool error = false;
 
 extern CRC_HandleTypeDef hcrc;
