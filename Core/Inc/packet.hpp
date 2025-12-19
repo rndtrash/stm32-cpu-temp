@@ -11,6 +11,8 @@ constexpr uint16_t UART_PACKET_MAGIC = 0x55AA; // В буфере: 0xAA 0x55
 enum class UartPacketTypes : uint8_t {
     INVALID = 0,
     ERROR,
+    PING,
+    PONG,
     REQUEST,
     REQUEST_CONTINUOUS_START,
     REQUEST_CONTINUOUS_STOP,
@@ -37,10 +39,6 @@ struct UartPacket {
     }
 };
 
-struct UartPacketRequestTemp : UartPacket {
-    explicit UartPacketRequestTemp() : UartPacket() { type = UartPacketTypes::REQUEST; }
-};
-
 struct UartPacketResponseTemp : UartPacket {
     explicit UartPacketResponseTemp(const float temp) : UartPacket(), temperature(temp) { type = UartPacketTypes::RESPONSE; }
 
@@ -58,6 +56,10 @@ struct UartPacketResponseTemp : UartPacket {
     }
 
     float temperature = .0f;
+};
+
+struct UartPacketPong : UartPacket {
+    explicit UartPacketPong() : UartPacket() { type = UartPacketTypes::PONG; }
 };
 
 struct UartPacketError : UartPacket {
