@@ -10,10 +10,10 @@ static bool error = false;
 extern CRC_HandleTypeDef hcrc;
 
 enum class PacketParseState {
-    INITIAL = 0,
-    FIRST_MAGIC,
+    FIRST_MAGIC = 0,
     SECOND_MAGIC,
     PACKET_TYPE,
+    PAYLOAD,
     CRC32
 };
 
@@ -45,57 +45,129 @@ static bool crcAndTransmit(uint32_t *buffer, const size_t bufferSize, const size
 template<typename T>
 [[nodiscard]]
 static bool sendPacket(T &packet) {
-    union {
-        std::array<std::byte, 16> packetBuffer;
-        std::array<uint32_t, 4> packetBuffer32 = {}; // Для выравнивания по границе двойного слова
-    };
+    alignas(uint32_t) std::array<std::byte, 16> packetBuffer = {};
 
     const std::optional<size_t> size = packet.serialize(packetBuffer.data(), packetBuffer.size());
     if (!size) return false;
 
-    return crcAndTransmit(packetBuffer32.data(), packetBuffer.size(), size.value());
+    return crcAndTransmit(reinterpret_cast<uint32_t *>(packetBuffer.data()), packetBuffer.size(), size.value());
 }
 
-static void parsePacket(const std::byte byte) {
-    static auto state = PacketParseState::INITIAL;
-    static std::array<std::byte, 16> packetBuffer = {};
+static void sendTemperature() {
+    // TODO: чтение настоящей температуры
+    const auto packet = UartPacketResponseTemp(13.37f);
+    if (!sendPacket(packet)) {
+        raiseError();
+    }
+}
+
+static void sendPong() {
+    if (const auto packet = UartPacketPong(); !sendPacket(packet)) {
+        raiseError();
+    }
+}
+
+namespace Parser {
+    static auto state = PacketParseState::FIRST_MAGIC;
     static size_t bufIndex = 0;
+    static size_t bufIndexCrc = 0;
 
-    packetBuffer[bufIndex] = byte;
-
-    const auto byteN = static_cast<uint8_t>(byte);
-    bool parsingError = false;
-    switch (state) {
-        case PacketParseState::INITIAL:
-            if (byteN == 0xAA) state = PacketParseState::FIRST_MAGIC;
-            parsingError = true;
-            break;
-
-        case PacketParseState::FIRST_MAGIC:
-            if (byteN == 0x55) state = PacketParseState::SECOND_MAGIC;
-            parsingError = true;
-            break;
-
-        case PacketParseState::SECOND_MAGIC:
-            if (byteN >= UART_PACKETS_COUNT) {
-                parsingError = true;
-                break;
-            }
-
-            switch (static_cast<UartPacketTypes>(byte)) {
-                case UartPacketTypes::INVALID:
-                default:
-                    parsingError = true;
-                    break;
-            }
-            break;
-
-        default:
-            break;
+    static void reset() {
+        state = PacketParseState::FIRST_MAGIC;
+        bufIndex = 0;
     }
 
-    if (parsingError) {
-        raiseError();
+    static void startCRC32() {
+        state = PacketParseState::CRC32;
+        bufIndexCrc = bufIndex;
+    }
+
+    static void parsePacket(const std::byte byte) {
+        alignas(uint32_t) static std::array<std::byte, 16> packetBuffer = {};
+        static auto packetType = UartPacketTypes::INVALID;
+
+        if (bufIndex >= packetBuffer.size()) {
+            raiseError();
+            return;
+        }
+        packetBuffer[bufIndex++] = byte;
+
+        const auto byteN = static_cast<uint8_t>(byte);
+        bool parsingError = false;
+        switch (state) {
+            case PacketParseState::FIRST_MAGIC:
+                if (byteN == 0xAA) state = PacketParseState::SECOND_MAGIC;
+                else parsingError = true;
+                break;
+
+            case PacketParseState::SECOND_MAGIC:
+                if (byteN == 0x55) state = PacketParseState::PACKET_TYPE;
+                else parsingError = true;
+                break;
+
+            case PacketParseState::PACKET_TYPE:
+                if (byteN >= UART_PACKETS_COUNT || (packetType = static_cast<UartPacketTypes>(byte)) ==
+                    UartPacketTypes::INVALID) {
+                    parsingError = true;
+                    break;
+                }
+
+                // TODO: парсинг для пакетов с доп. данными
+                if (packetType == UartPacketTypes::RESPONSE) {
+                    state = PacketParseState::PAYLOAD;
+                } else {
+                    startCRC32();
+                }
+                break;
+
+            case PacketParseState::PAYLOAD:
+                // TODO: парсинг для пакетов с доп. данными
+                startCRC32();
+                break;
+
+            case PacketParseState::CRC32:
+                if (bufIndex - bufIndexCrc == 4) {
+                    const auto buffer32 = reinterpret_cast<uint32_t *>(packetBuffer.data());
+                    const auto crcActual = HAL_CRC_Calculate(&hcrc, buffer32, bufIndexCrc);
+
+                    uint32_t crcReceived = 0;
+                    for (size_t i = 0; i < sizeof(crcReceived); i++) {
+                        crcReceived |= static_cast<uint8_t>(packetBuffer[bufIndexCrc + i]) << (i * 8);
+                    }
+
+                    if (crcReceived == crcActual) {
+                        switch (packetType) {
+                            case UartPacketTypes::PING:
+                                sendPong();
+                                break;
+
+                            case UartPacketTypes::REQUEST:
+                                sendTemperature();
+                                break;
+
+                            // TODO: continuous
+                            case UartPacketTypes::REQUEST_CONTINUOUS_START:
+                            case UartPacketTypes::REQUEST_CONTINUOUS_STOP:
+
+                            default:
+                                parsingError = true;
+                                break;
+                        }
+                    } else {
+                        parsingError = true;
+                    }
+                    reset();
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        if (parsingError) {
+            raiseError();
+            reset();
+        }
     }
 }
 
@@ -103,7 +175,7 @@ static void parsePacket(const std::byte byte) {
 void mainLoop() {
     for (;;) {
         if (auto byte = queue.pop()) {
-            parsePacket(byte.value());
+            Parser::parsePacket(byte.value());
         }
 
         if (error) {
