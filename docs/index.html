@@ -9,9 +9,22 @@
             padding: 10px;
         }
 
-        textarea {
+        #log {
+            display: flex;
+            flex-flow: column nowrap;
             width: 100%;
             height: 300px;
+            border: 1px solid black;
+            overflow-y: scroll;
+
+            > span {
+                font-family: monospace;
+                padding: 2px;
+
+                &:nth-child(even) {
+                    background-color: #f0f0f0;
+                }
+            }
         }
     </style>
 </head>
@@ -30,7 +43,7 @@
 <details>
     <summary>Отладка</summary>
 
-    <textarea id="log" readonly></textarea>
+    <div id="log"></div>
     <br><br>
 
     <input id="tx" placeholder="01 02 03 04">
@@ -70,7 +83,12 @@
     const errorMessage = document.getElementById('error');
 
     function logLine(s) {
-        log.value += s + "\n";
+        let span = document.createElement("span");
+        span.innerText = s;
+        log.appendChild(span);
+        while (log.childElementCount > 100) {
+            log.removeChild(log.children[0]);
+        }
         log.scrollTop = log.scrollHeight;
     }
 
@@ -226,7 +244,7 @@
     }
 
     function processPacket(id, ...payload) {
-        console.log('DEBUG:', id, ...payload);
+        // console.log('DEBUG:', id, ...payload);
 
         switch (id) {
             case PacketIds.ERROR:
