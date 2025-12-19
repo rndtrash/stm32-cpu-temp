@@ -260,6 +260,7 @@
 
         logLine('[CONNECTED]');
 
+        await requestTemp(); // Начальный запрос, чтобы не висел NaN
         tempUpdater = setInterval(async () => {
             await requestTemp();
         }, 500);
