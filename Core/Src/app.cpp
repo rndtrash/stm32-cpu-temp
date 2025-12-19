@@ -1,12 +1,18 @@
 #include "stm32f0xx_ll_usart.h"
+#include "stm32f0xx_ll_adc.h"
 
 #include <app.h>
 #include <packet.hpp>
 #include <queue.hpp>
 
+extern uint16_t ADC_VAL[2];
+extern std::atomic<uint16_t> adcTemperature;
+extern std::atomic<uint16_t> adcVref;
+
 static auto queue = CircularQueue<std::byte, 32>();
 static bool error = false;
 
+extern ADC_HandleTypeDef hadc;
 extern CRC_HandleTypeDef hcrc;
 
 enum class PacketParseState {
@@ -54,9 +60,18 @@ static bool sendPacket(T &packet) {
 }
 
 static void sendTemperature() {
-    // TODO: чтение настоящей температуры
-    const auto packet = UartPacketResponseTemp(13.37f);
-    if (!sendPacket(packet)) {
+    if (HAL_ADC_PollForConversion(&hadc, 20) != HAL_OK) {
+        raiseError();
+        return;
+    }
+
+    const auto rawValue = static_cast<uint16_t>(HAL_ADC_GetValue(&hadc));
+    constexpr auto AVG_SLOPE = static_cast<float>(4.3 * 4096.0 / 3300.0);
+    const auto VDDA = VREFINT_CAL_VREF * *VREFINT_CAL_ADDR / adcVref / 1000.f;
+    // TODO: херня какая-то получилась
+    const auto temperature = (static_cast<float>(rawValue) * VDDA / 3.3f - static_cast<float>(*TEMPSENSOR_CAL1_ADDR)) / AVG_SLOPE + TEMPSENSOR_CAL1_TEMP;
+
+    if (const auto packet = UartPacketResponseTemp(temperature); !sendPacket(packet)) {
         raiseError();
     }
 }
@@ -173,6 +188,10 @@ namespace Parser {
 
 [[noreturn]]
 void mainLoop() {
+    if (HAL_ADC_Start_DMA(&hadc, reinterpret_cast<uint32_t*>(&ADC_VAL), 2) != HAL_OK) {
+        raiseError();
+    }
+
     for (;;) {
         if (auto byte = queue.pop()) {
             Parser::parsePacket(byte.value());

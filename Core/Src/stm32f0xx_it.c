@@ -42,7 +42,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-
+uint16_t ADC_VAL[2];
+_Atomic uint16_t adcTemperature = 0;
+_Atomic uint16_t adcVref = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,7 +58,8 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-
+extern DMA_HandleTypeDef hdma_adc;
+extern ADC_HandleTypeDef hadc;
 /* USER CODE BEGIN EV */
 /* USER CODE END EV */
 
@@ -141,6 +144,34 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles DMA1 channel 1 interrupt.
+  */
+void DMA1_Channel1_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel1_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_adc);
+  /* USER CODE BEGIN DMA1_Channel1_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles ADC global interrupt.
+  */
+void ADC1_IRQHandler(void)
+{
+  /* USER CODE BEGIN ADC1_IRQn 0 */
+
+  /* USER CODE END ADC1_IRQn 0 */
+  HAL_ADC_IRQHandler(&hadc);
+  /* USER CODE BEGIN ADC1_IRQn 1 */
+
+  /* USER CODE END ADC1_IRQn 1 */
+}
+
+/**
   * @brief This function handles USART2 global interrupt.
   */
 void USART2_IRQHandler(void)
@@ -163,5 +194,12 @@ void USART2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *_hadc) {
+  raiseError();
+}
 
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *_hadc) {
+  adcTemperature = ADC_VAL[0];
+  adcVref = ADC_VAL[1];
+}
 /* USER CODE END 1 */
