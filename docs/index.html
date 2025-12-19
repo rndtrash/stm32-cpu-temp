@@ -4,14 +4,26 @@
     <meta charset="UTF-8">
     <title>STM32 CPU Temperature</title>
     <style>
-        body { font-family: monospace; padding: 10px; }
-        textarea { width: 100%; height: 300px; }
+        body {
+            font-family: monospace;
+            padding: 10px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 300px;
+        }
     </style>
 </head>
 <body>
 
 <button onclick="connect()">Подключиться</button>
 <br><br>
+
+<h1 style="color: maroon; display: none" id="error">
+    ОШИБКА КОНТРОЛЛЕРА!
+    <button style="color: initial" onclick="document.getElementById('error').style.display = 'none'">[X]</button>
+</h1>
 
 <h1>Температура: <span style="font-family: monospace" id="mcuTemp">NaN</span>&deg;C</h1>
 
@@ -43,15 +55,19 @@
         REQUEST_CONTINUOUS_START: 5,
         REQUEST_CONTINUOUS_STOP: 6,
         RESPONSE: 7,
+        PACKETS_COUNT: 8,
     };
     Object.freeze(PacketIds);
 
     let port, reader, writer;
     let keepReading = false;
-    let pingStart;
+    let pingStart = null;
+    let tempUpdater = null;
 
     const log = document.getElementById('log');
-    const pingResponse = document.getElementById("pingResponse");
+    const mcuTemp = document.getElementById('mcuTemp');
+    const pingResponse = document.getElementById('pingResponse');
+    const errorMessage = document.getElementById('error');
 
     function logLine(s) {
         log.value += s + "\n";
@@ -68,13 +84,30 @@
         );
     }
 
-    function numberToLE(value, byteLength) {
+    function integerToLE(value, byteLength) {
         const bytes = new Uint8Array(byteLength);
         for (let i = 0; i < byteLength; i++) {
             bytes[i] = value & 0xFF;
             value >>= 8;
         }
         return bytes;
+    }
+
+    function leToInteger(bytes) {
+        let value = 0;
+        for (let i = 0; i < bytes.length; i++) {
+            value += bytes[i] << (8 * i);
+        }
+        return value >>> 0;
+    }
+
+    function leToFloat32(bytes) {
+        const buffer = new ArrayBuffer(4);
+        const view = new DataView(buffer);
+
+        bytes.forEach((b, i) => view.setUint8(i, b));
+
+        return view.getFloat32(0, true);
     }
 
     // CRC-32/MPEG-2
@@ -95,27 +128,163 @@
         return crc >>> 0;
     }
 
+    const ParseState = {
+        FIRST_MAGIC: 0,
+        SECOND_MAGIC: 1,
+        PACKET_TYPE: 2,
+        PAYLOAD: 3,
+        CRC32: 4,
+    };
+    Object.freeze(ParseState);
+
+    let parserState = ParseState.FIRST_MAGIC;
+    let parserPayload = [];
+    let parserPayloadBytes = [];
+    let buffer = [];
+    let crcBuffer = [];
+    let packetType = PacketIds.INVALID;
+
+    function resetParser() {
+        parserState = ParseState.FIRST_MAGIC;
+        buffer = [];
+    }
+
+    function parserInitCrc() {
+        parserState = ParseState.CRC32;
+        crcBuffer = [];
+    }
+
+    function parseByte(byte) {
+        function parserError(err) {
+            resetParser();
+            throw err;
+        }
+
+        buffer = [...buffer, byte];
+
+        switch (parserState) {
+            case ParseState.FIRST_MAGIC:
+                if (byte !== 0xAA) parserError(`Invalid magic (expected 0xAA, got ${byte})`);
+                parserState = ParseState.SECOND_MAGIC;
+                break;
+
+            case ParseState.SECOND_MAGIC:
+                if (byte !== 0x55) parserError(`Invalid magic (expected 0xAA, got ${byte})`);
+                parserState = ParseState.PACKET_TYPE;
+                break;
+
+            case ParseState.PACKET_TYPE:
+                if (byte >= PacketIds.PACKETS_COUNT || byte === PacketIds.INVALID)
+                    parserError(`Invalid packet id "${byte}"`);
+
+                packetType = byte;
+                if (packetType === PacketIds.RESPONSE) {
+                    parserState = ParseState.PAYLOAD;
+                    parserPayload = [];
+                    parserPayloadBytes = [];
+                } else {
+                    parserInitCrc();
+                }
+                break;
+
+            case ParseState.PAYLOAD:
+                parserPayloadBytes = [...parserPayloadBytes, byte];
+                switch (packetType) {
+                    case PacketIds.RESPONSE:
+                        if (parserPayloadBytes.length === 4) {
+                            parserPayload = [leToFloat32(parserPayloadBytes)];
+                            parserInitCrc();
+                        }
+                        break;
+
+                    default:
+                        parserError(`No payload parsing logic for packet type "${packetType}"`);
+                }
+                break;
+
+            case ParseState.CRC32:
+                crcBuffer = [...crcBuffer, byte];
+                if (crcBuffer.length === 4) {
+                    let crcActual = crc32_stm32(buffer.slice(0, -4));
+                    let crcReceived = leToInteger(buffer.slice(-4));
+                    if (crcReceived !== crcActual) {
+                        let crcActualString = bytesToHex(integerToLE(crcActual));
+                        let crcReceivedString = bytesToHex(buffer.slice(-4));
+                        parserError(`Invalid checksum (expected "${crcActualString}", got "${crcReceivedString}")`);
+                    }
+
+                    let pt = packetType;
+                    let pp = parserPayload;
+                    resetParser();
+                    processPacket(pt, ...pp);
+                }
+                break;
+
+            default:
+                parserError(`Unknown state: ${parserState}`);
+        }
+    }
+
+    function processPacket(id, ...payload) {
+        console.log('DEBUG:', id, ...payload);
+
+        switch (id) {
+            case PacketIds.ERROR:
+                errorMessage.style.display = 'initial';
+                break;
+
+            case PacketIds.RESPONSE:
+                mcuTemp.innerText = payload[0].toFixed(2);
+                break;
+
+            case PacketIds.PONG:
+                if (pingStart === null) throw `Received an unwanted pong`;
+
+                let timeElapsed = performance.now() - pingStart;
+                pingResponse.innerText = `Понг! ${timeElapsed.toFixed(2)} мс`;
+                pingStart = null;
+                break;
+
+            default:
+                throw `Unknown packet ID: "${id}"`;
+        }
+    }
+
     async function connect() {
         port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 9600 });
+        await port.open({baudRate: 9600});
 
         writer = port.writable.getWriter();
         reader = port.readable.getReader();
         keepReading = true;
 
-        logLine("[CONNECTED]");
+        logLine('[CONNECTED]');
+
+        tempUpdater = setInterval(async () => {
+            await requestTemp();
+        }, 500);
+
         await readLoop();
     }
 
     async function readLoop() {
         try {
             while (keepReading) {
-                const { value, done } = await reader.read();
+                const {value, done} = await reader.read();
                 if (done) break;
-                if (value) logLine(bytesToHex(value));
+                if (value) {
+                    for (const byte of [...value]) {
+                        try {
+                            parseByte(byte);
+                        } catch (e) {
+                            logLine(`[PARSING ERROR: ${e}]`);
+                        }
+                    }
+                    logLine(bytesToHex(value));
+                }
             }
         } catch (e) {
-            logLine("[READ ERROR]");
+            logLine('[READ ERROR]');
         } finally {
             await disconnect();
         }
@@ -124,12 +293,27 @@
     async function disconnect() {
         keepReading = false;
 
-        try { reader?.cancel(); } catch {}
-        try { reader?.releaseLock(); } catch {}
-        try { writer?.releaseLock(); } catch {}
-        try { await port?.close(); } catch {}
+        clearInterval(tempUpdater);
+        tempUpdater = null;
 
-        logLine("[DISCONNECTED]");
+        try {
+            reader?.cancel();
+        } catch {
+        }
+        try {
+            reader?.releaseLock();
+        } catch {
+        }
+        try {
+            writer?.releaseLock();
+        } catch {
+        }
+        try {
+            await port?.close();
+        } catch {
+        }
+
+        logLine('[DISCONNECTED]');
     }
 
     async function send() {
@@ -144,12 +328,14 @@
         for (const arg of arguments) {
             let argType = typeof arguments;
             switch (argType) {
-                default: throw `Неизвестный тип данных "${argType}" у значения "${arg}"`;
+                // TODO: пакеты с доп. данными
+                default:
+                    throw `Неизвестный тип данных "${argType}" у значения "${arg}"`;
             }
         }
 
         let crc = crc32_stm32(data);
-        data = [...data, ...numberToLE(crc, 4)];
+        data = [...data, ...integerToLE(crc, 4)];
         await writer.write(new Uint8Array(data));
     }
 
@@ -160,7 +346,11 @@
         await sendPacket(PacketIds.PING);
     }
 
-    navigator.serial.addEventListener("disconnect", e => {
+    async function requestTemp() {
+        await sendPacket(PacketIds.REQUEST);
+    }
+
+    navigator.serial.addEventListener('disconnect', e => {
         if (e.target === port) disconnect();
     });
 </script>
