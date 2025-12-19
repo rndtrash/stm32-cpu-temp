@@ -33,7 +33,7 @@ public:
     [[nodiscard]] bool isFull() const { return !empty && indexStart == indexEnd; }
 
 private:
-    std::array<std::byte, size> array;
+    std::array<std::byte, size> array = {};
     std::atomic<size_t> indexStart = 0;
     std::atomic<size_t> indexEnd = 0;
     std::atomic<bool> empty = true;
